@@ -1,0 +1,274 @@
+//topmodule
+module booth_top (
+    input clk,
+    input start,
+    input [15:0] multiplicand,
+    input [15:0] multiplier,
+    output done,
+    output [31:0] product
+);
+
+    // Control signals
+    wire ldA, ldQ, ldM;
+    wire clrA, clrQ, clrff;
+    wire sftA, sftQ;
+    wire addsub;
+    wire decr, ldcnt;
+
+    // Status signals
+    wire qm1, eqz, qo;
+
+    // Internal registers (for product)
+    wire [15:0] A, Q;
+
+    // ================= DATAPATH =================
+    booth DP (
+        .ldA(ldA),
+        .ldQ(ldQ),
+        .ldM(ldM),
+        .clrA(clrA),
+        .clrQ(clrQ),
+        .clrff(clrff),
+        .sftA(sftA),
+        .sftQ(sftQ),
+        .addsub(addsub),
+        .decr(decr),
+        .ldcnt(ldcnt),
+        .data_in(multiplicand),
+        .clk(clk),
+        .qm1(qm1),
+        .eqz(eqz),
+        .qo(qo)
+    );
+
+    // ================= CONTROLLER =================
+    controller CP (
+        .clk(clk),
+        .start(start),
+        .Q0(qo),
+        .qm1(qm1),
+        .eqz(eqz),
+        .ldA(ldA),
+        .clrA(clrA),
+        .shfA(sftA),
+        .ldQ(ldQ),
+        .clrQ(clrQ),
+        .shfQ(sftQ),
+        .ldM(ldM),
+        .clrff(clrff),
+        .addsub(addsub),
+        .decr(decr),
+        .ldcnt(ldcnt),
+        .done(done)
+    );
+
+    // Final product
+    assign product = {A, Q};
+
+endmodule
+
+//datapath
+module booth(
+    input ldA, ldQ, ldM,
+    input clrA, clrQ, clrff,
+    input sftA, sftQ,
+    input addsub,
+    input decr, ldcnt,
+    input clk,
+    input [15:0] data_in,
+    output qm1, eqz, qo
+);
+
+  wire [15:0] A, M, Q, Z;
+  wire [4:0] count;
+
+  assign qo  = Q[0];
+  assign eqz = ~|count;
+
+  shiftreg AR (Z, A, A[15], clk, ldA, clrA, sftA);
+  shiftreg QR (data_in, Q, A[0], clk, ldQ, clrQ, sftQ);
+
+  dff QM1 (Q[0], qm1, clk, clrff);
+  PIPO MR (M, data_in, clk, ldM);
+  ALU AS (Z, A, M, addsub);
+  counter CN (count, decr, ldcnt, clk);
+
+endmodule
+
+
+module shiftreg(
+    input [15:0] data_in,
+    output reg [15:0] data_out,
+    input s_in, clk, ld, clr, sft
+);
+  always @(posedge clk) begin
+    if (clr)       data_out <= 16'b0;
+    else if (ld)   data_out <= data_in;
+    else if (sft)  data_out <= {s_in, data_out[15:1]};
+  end
+endmodule
+
+
+module PIPO (
+    output reg [15:0] data_out,
+    input  [15:0] data_in,
+    input clk, load
+);
+  always @(posedge clk)
+    if (load) data_out <= data_in;
+endmodule
+
+
+module dff (
+    input d, clk, clrff,
+    output reg q
+);
+  always @(posedge clk)
+    if (clrff) q <= 1'b0;
+    else       q <= d;
+endmodule
+
+module ALU (
+    output reg [15:0] out,
+    input [15:0] in1, in2,
+    input addsub
+);
+  always @(*) begin
+    if (addsub) out = in1 + in2;
+    else        out = in1 - in2;
+  end
+endmodule
+
+module counter (
+    output reg [4:0] data_out,
+    input decr, ldcnt, clk
+);
+  always @(posedge clk) begin
+    if (ldcnt)      data_out <= 5'd16;
+    else if (decr)  data_out <= data_out - 1;
+  end
+endmodule
+
+//Control Path
+
+module controller ( ldA, clrA, shfA, ldQ, clrQ, shfQ, ldM,
+                    clrff, addsub, start, decr, ldcnt, done,
+                    clk, qo, qm1, eqz );
+
+input clk, qo, qm1, start, eqz;      // status given in textbook
+
+output reg ldA, clrA, shfA, ldQ, clrQ, shfQ, ldM, clrff,
+           addsub, decr, ldcnt, done;
+
+reg [2:0] state;
+
+parameter S0 = 3'b000,
+          S1 = 3'b001,
+          S2 = 3'b010,
+          S3 = 3'b011,
+          S4 = 3'b100,
+          S5 = 3'b101,
+          S6 = 3'b110;
+
+
+always @(posedge clk)
+begin
+    case(state)
+
+        S0: if(start)
+                state <= S1;
+
+        S1: state <= S2;
+
+      S2: #2 if({qo, qm1} == 2'b01)
+                    state <= S3;
+      else if({qo, qm1} == 2'b10)
+                    state <= S4;
+                else
+                    state <= S5;
+
+        S3: state <= S5;
+
+        S4: state <= S5;
+
+      S5: #2 if(({qo, qm1} == 2'b01) && !eqz)
+                    state <= S3;
+      else if(({qo, qm1} == 2'b10) && !eqz)
+                    state <= S4;
+                else if(eqz)
+                    state <= S6;
+
+        S6: state <= S6;
+
+        default: state <= S0;
+
+    endcase
+end
+
+always @(state)
+begin
+    case (state)
+
+        S0: begin
+                clrA = 0; ldA = 0; shfA = 0;
+                clrQ = 0; ldQ = 0; shfQ = 0;
+                ldM = 0; clrff = 0;
+                done = 0;
+            end
+
+        S1: begin
+                clrA = 1; clrff = 1;
+                ldcnt = 1; ldM = 1;
+                ldQ = 1;
+            end
+
+        S2: begin
+                clrA = 0; clrff = 0;
+                ldcnt = 0; ldM = 0;
+                ldQ = 0;
+            end
+
+        S3: begin
+                ldA = 1;
+                addsub = 1;
+                ldQ = 0;
+                shfA = 0;
+                shfQ = 0;
+                decr = 0;
+            end
+
+        S4: begin
+                ldA = 1;
+                addsub = 0;
+                ldQ = 0;
+                shfA = 0;
+                shfQ = 0;
+                decr = 0;
+            end
+
+        S5: begin
+                shfA = 1;
+                shfQ = 1;
+                ldA = 0;
+                ldQ = 0;
+                decr = 1;
+            end
+
+        S6: begin
+                done = 1;
+                shfA = 0;
+                shfQ = 0;
+                decr = 0;
+            end
+
+        default: begin
+                    clrA = 0;
+                    shfA = 0;
+                    ldQ = 0;
+                    shfQ = 0;
+                 end
+
+    endcase
+end
+
+endmodule
